@@ -1,0 +1,166 @@
+import os
+import shutil
+import pandas as pd
+import pickle
+from Bio import SeqIO
+
+### Parameters
+xlfile = "peptides.xlsx" ### search result file
+fastafile = "protein.fasta" ### protein database
+color = {}  ### define color of each sample
+color[S1] = "blue"
+color[S2] = "red"
+color[S3] = "orange"
+color[S4] = "green"
+color[S5] = "purple"
+color[S6] = "black"
+
+# Derived file names
+treepicklefile = xlfile.replace(".xlsx", ".tree.pkl")
+xlpicklefile = xlfile.replace(".xlsx", ".pkl")
+outputfolder = xlfile.replace(".xlsx","")
+outputfile = xlfile.replace(".xlsx",".html")
+outputfile = outputfolder+"/"+outputfile
+
+#prepare output
+
+if os.path.exists(outputfolder):
+    shutil.rmtree(outputfolder)
+
+
+try:
+    shutil.copytree("htmltemplate", outputfolder)
+# Directories are the same
+except shutil.Error as e:
+    print('Directory not copied. Error: %s' % e)
+# Any error saying that the directory doesn't exist
+except OSError as e:
+    print('Directory not copied. Error: %s' % e)
+
+globaloutfile = open(outputfile, "w")
+
+# Check if data was pickled before, if not read in and fix up the excel file data, then pickle
+if os.path.isfile(treepicklefile):
+    with open(treepicklefile,"rb") as picklefile:
+        datatree = pickle.load(picklefile)
+else:
+    if os.path.isfile(xlpicklefile):
+        print("Reading pickle file "+xlpicklefile)
+        xl = pd.read_pickle(xlpicklefile)
+    else:
+        print("Reading excel file "+xlfile)
+        xl = pd.read_excel(xlfile)
+        print("removing non-unique pepetides")
+
+        xl = xl[~xl["Protein Group Accessions"].str.contains(';', na=True)]
+        #print("Ungrouping proteins")
+        #s = xl["Protein Group Accessions"].str.split(';').apply(pd.Series, 1).stack()
+        #s.index = s.index.droplevel(-1)
+        #s.name = "Protein Accession"
+        #xl = xl.join(s)
+        xl.rename(columns={"Protein Group Accessions":"Protein Accession"},inplace=True)
+        xl.to_pickle(xlpicklefile)
+
+    # Dictionary for collecting data from the excel file
+    datatree = {}
+
+    # extract the relevant column names - PD format first few columns are the experiments, then the Sequence headed file.
+    seqcolumn = xl.columns.get_loc("Sequence")
+    experimentnames = xl.columns[:seqcolumn]
+
+
+    print("Reshuffeling excel data")
+    for row in xl.iterrows():
+        experiments = row[1][:seqcolumn]
+        for expname in experimentnames[pd.notnull(experiments)]:
+
+            sequence = row[1]["Sequence"].upper()
+            acc = row[1]["Protein Accession"]
+
+            if pd.notnull(acc):
+                if acc not in datatree.keys():
+                    datatree[acc] = {}
+
+                if expname not in datatree[acc].keys():
+                    datatree[acc][expname] = []
+
+                datatree[acc][expname].append(sequence)
+
+    with open(treepicklefile, "wb") as picklefile:
+        pickle.dump(datatree,picklefile)
+
+print("Reading in FASTA file")
+# We're going to glob the fasta database, since we know we need (almost) everything anyway.
+fasta = SeqIO.to_dict(SeqIO.parse(fastafile, "fasta"), key_function=lambda x: x.id.split("|")[1])
+
+# Prepare HTML header and a tiny bit of body
+htmlintro = """
+<html>
+
+<head>
+    <title>Protein overview of {0}</title>
+    <link rel="stylesheet" type="text/css" href="bower_components/bootstrap/dist/css/bootstrap.css">
+    <link rel="stylesheet" href="index.css">
+    <script src="bower_components/feature-viewer/dist/feature-viewer.bundle.js"></script>
+    <script src="loadunload.js"></script>
+    <style>.folder{{location: inline; vertical-align: middle; horizontal-align: center; width: 20px; height: 20px; border:1px solid black; background: white}}</style>
+</head>
+<body> <h1>{0}</h1>
+""".format(xlfile)
+
+print(htmlintro, file=globaloutfile)
+
+htmldiv = "<h2>{0} <span class=""folder"" id=""{0}_fold"" onClick=""loadunload('{0}')"">+</span></h2><p>{1}</p><div id='{2}'> </div>"
+
+for acc in sorted(datatree.keys()):
+    if fasta[acc].description.find("Homo sapiens") == -1:
+        print(acc)
+        protein = str(fasta[acc].seq)
+        divname = acc+"_div"
+
+        print(htmldiv.format(acc, fasta[acc].description, divname), file=globaloutfile)
+
+        # Construct the features
+        features = []
+        for exp in sorted(datatree[acc].keys()):
+            positions = []
+            for seq in set(datatree[acc][exp]):
+                pos = protein.find(seq)
+                if pos >= 0:
+                    positions.append("{{x:{0},y:{1},description:'{2}'}}".format(pos + 1, pos + len(seq), seq))
+
+            feature = """
+                viewer.addFeature({{
+                    data: [{0}],
+                    name: "{1}",
+                    className: "class_{1}",
+                    type: "rect",
+                    color: "{2}",
+                    height: 8
+                }});
+                """
+            feature = feature.format(",".join(positions), exp, color[exp])
+            features.append(feature)
+
+            # Create a featureviewer for the features
+            featureviewer = """
+            var viewer = new FeatureViewer("{0}",
+            "#{1}", {{
+                showAxis: true,
+                showSequence: true,
+                brushActive: true,
+                toolbar: true,
+                bubbleHelp: true,
+                zoomMax: 10
+            }});"""
+
+        featureviewer = featureviewer.format(protein, divname)
+
+        with open(outputfolder+"/"+acc, "w") as proteinfile:
+            print(featureviewer,file=proteinfile)
+            print("\n".join(features),file=proteinfile)
+
+
+print("</body></html>", file=globaloutfile)
+
+globaloutfile.close()
